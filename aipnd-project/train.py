@@ -3,6 +3,7 @@ from torch import nn
 from torch import optim
 import torch.nn.functional as F
 import torchvision
+from torch.autograd import Variable
 from torchvision import datasets, transforms, models
 from collections import OrderedDict
 
@@ -23,12 +24,12 @@ def get_command_line_args():
 
     return parser.parse_args()
 
-def train(model, learning_rate, hidden_units, epochs):
+def train(model, learning_rate, hidden_units, epochs, dataloaders, image_datesets_size):
     for param in model.parameters():
         param.requires_grad = False
 
     input_size = 25088
-    hidden_sizes = [hidden_units, hidden_units/2, hidden_units/4]
+    hidden_sizes = [hidden_units, int(hidden_units/2), int(hidden_units/4)]
 
     classifier = nn.Sequential(OrderedDict([
         ("fc1", nn.Linear(input_size, hidden_sizes[0])),
@@ -48,37 +49,47 @@ def train(model, learning_rate, hidden_units, epochs):
 
     epochs = epochs
     print_every = 20
-    steps = 0
 
     model.to("cuda")
-    model.train()
 
     for e in range(epochs):
-        running_loss = 0
+        print("\nEpoch {} / {}".format(e + 1, epochs))
 
-        for inputs, labels in dataloaders["training"]:
-            steps += 1
+        for phase in ["training", "validation"]:
+            if phase == "training":
+                model.train(True)
+            else:
+                model.train(False)
 
-            inputs, labels = inputs.to("cuda"), labels.to("cuda")
+            running_loss = 0
+            running_corrects = 0
 
-            optimizer.zero_grad()
+            for inputs, labels in dataloaders[phase]:
+                inputs, labels = Variable(inputs.cuda()), Variable(labels.cuda())
 
-            # Forward and backward passes
-            outputs = model.forward(inputs) #forward
-            loss = criterion(outputs, labels)
-            loss.backward() #backward
-            optimizer.step()
+                optimizer.zero_grad()
+
+                #Forward
+                outputs = model.forward(inputs)
+                _, preds = torch.max(outputs.data, 1)
+                loss = criterion(outputs, labels)
+
+                if phase == "training":
+                    loss.backward()
+                    optimizer.step()
+
             running_loss += loss.item()
+            running_corrects += int(torch.sum(preds == labels.data))
 
-            if steps % print_every == 0:
-                print("Epoch: {}/{}... ".format(e+1, epochs),
-                      "Loss: {:.4f}".format(running_loss/print_every))
+        epoch_loss = running_loss / image_datesets_size[phase]
+        epoch_acc = running_corrects / image_datesets_size[phase]
 
-                running_loss = 0
+        print("{} Loss: {:.4f} Acc: {:.4f}".format(
+                phase, epoch_loss, epoch_acc))
 
-def save(model, arch, learning_rate, input_size, hidden_sizes, epochs):
-    model.class_to_idx = image_datasets["training"].class_to_idx
+    return model, optimizer
 
+def save(model, optimizer, arch, learning_rate, input_size, hidden_sizes, epochs):
     state = {
         "arch": arch,
         "learning_rate": learning_rate,
@@ -155,8 +166,15 @@ def main():
 
     model = getattr(torchvision.models, args.arch)(pretrained=True)
 
-    train(model, learning_rate, hidden_units, epochs)
-    save(model, arch, learning_rate, 25088, hidden_units, epochs)
+    image_datesets_size = {
+        "training": len(image_datasets["training"]),
+        "validation": len(image_datasets["validation"])
+    }
+
+    model, optimizer = train(model, learning_rate, hidden_units, epochs, dataloaders, image_datesets_size)
+
+    model.class_to_idx = image_datasets["training"].class_to_idx
+    save(model, optimizer, arch, learning_rate, 25088, hidden_units, epochs)
 
 if __name__ == "__main__":
     main()
